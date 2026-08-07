@@ -1,0 +1,415 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sidey383 <sidey383@mail.ru>
+Date: Fri, 7 Aug 2026 03:45:04 +0300
+Subject: [PATCH] XMine: Add Plugin#onPostUnload and
+ Server#getWorldContainerPath
+
+Adds a post-unload phase that runs after the worlds have been saved,
+closed and unlocked, for plugins that need to touch the raw world files
+on disk (backups, uploads) once nothing else can be writing to them, and
+an absolute path to the world container that stays valid that late.
+
+To make the phase usable at all, SimplePluginManager#beginShutdown tells
+the JavaPluginLoader to defer tearing down the plugin class loaders while
+plugins are being disabled, so onPostUnload can still load classes and
+read resources out of the plugin jars; postUnloadPlugins closes them once
+no plugin code will run again.
+
+Nothing can interrupt onPostUnload - the watchdog is stopped before the
+shutdown sequence starts - so each call is timed and a plugin that runs
+over xmine.postUnloadWarnMillis is named in the log.
+
+diff --git a/src/main/java/org/bukkit/Bukkit.java b/src/main/java/org/bukkit/Bukkit.java
+index e8414592b3afeb1e5db2b817b8fb7c13e073b9aa..f87c96afc1c289adc6a2906de0a4926483187501 100644
+--- a/src/main/java/org/bukkit/Bukkit.java
++++ b/src/main/java/org/bukkit/Bukkit.java
+@@ -1112,6 +1112,20 @@ public final class Bukkit {
+         return server.getWorldContainer();
+     }
+ 
++    // XMine start - resolved world container path
++    /**
++     * Gets the folder that contains all of the various {@link World}s, as an
++     * absolute and normalized {@link java.nio.file.Path}.
++     *
++     * @return absolute path of the folder that contains all worlds
++     * @see Server#getWorldContainerPath()
++     */
++    @NotNull
++    public static java.nio.file.Path getWorldContainerPath() {
++        return server.getWorldContainerPath();
++    }
++    // XMine end - resolved world container path
++
+     /**
+      * Gets every player that has ever played on this server.
+      *
+diff --git a/src/main/java/org/bukkit/Server.java b/src/main/java/org/bukkit/Server.java
+index e88b47a838dc472ad64271a518ee1789f7be19fa..d97cf2a364bb352ad8922bf1860c9c0f23778829 100644
+--- a/src/main/java/org/bukkit/Server.java
++++ b/src/main/java/org/bukkit/Server.java
+@@ -933,6 +933,32 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
+     @NotNull
+     public File getWorldContainer();
+ 
++    // XMine start - resolved world container path
++    /**
++     * Gets the folder that contains all of the various {@link World}s, as an
++     * absolute and normalized {@link java.nio.file.Path}.
++     * <p>
++     * Unlike {@link #getWorldContainer()}, which may hand out a relative path
++     * (e.g. {@code .}) exactly as it was given on the command line or in
++     * {@code bukkit.yml}, this is the fully resolved location of the world
++     * files on disk.
++     * <p>
++     * It is resolved once while the server is starting up and kept for the
++     * lifetime of the server, so it never depends on the current working
++     * directory or on the level session still being open. In particular it
++     * stays valid inside {@link org.bukkit.plugin.Plugin#onPostUnload()}, which
++     * runs after the worlds have been closed.
++     *
++     * @return absolute path of the folder that contains all worlds
++     */
++    @NotNull
++    default java.nio.file.Path getWorldContainerPath() {
++        // Resolved on every call rather than once at startup - correct for any
++        // implementation, but only while getWorldContainer() itself still works.
++        return getWorldContainer().toPath().toAbsolutePath().normalize();
++    }
++    // XMine end - resolved world container path
++
+     /**
+      * Gets every player that has ever played on this server.
+      *
+diff --git a/src/main/java/org/bukkit/plugin/Plugin.java b/src/main/java/org/bukkit/plugin/Plugin.java
+index 79890c68f1ad31f951dfdbd9a16dac500ec58c40..0197734a2d5a6b0aff692c4758b1d7d0c76399b6 100644
+--- a/src/main/java/org/bukkit/plugin/Plugin.java
++++ b/src/main/java/org/bukkit/plugin/Plugin.java
+@@ -130,6 +130,85 @@ public interface Plugin extends TabExecutor {
+      */
+     public void onEnable();
+ 
++    // XMine start - postUnload
++    /**
++     * Called during server shutdown, after every plugin has been disabled and
++     * after every world has been saved, closed and unlocked.
++     * <p>
++     * This is the last piece of plugin code the server runs. It is intended
++     * for plugins that need to work with the raw world files on disk (backups,
++     * uploading to external storage, ...) at a point where nothing else can be
++     * writing to them anymore. Use {@link Server#getWorldContainerPath()} to
++     * locate them.
++     * <p>
++     * It is called at most once per server lifetime, in reverse load order, for
++     * every plugin that was still enabled when the shutdown started. A plugin
++     * that was disabled earlier at runtime is skipped, because its class loader
++     * is already closed by then. Exceptions thrown out of it are logged and do
++     * not stop the remaining plugins from being post-unloaded.
++     *
++     * <p><b>This is not a guaranteed hook.</b> It is skipped entirely when the
++     * process dies without running the shutdown sequence (SIGKILL, power loss,
++     * a fatal JVM error) or when the shutdown sequence itself throws before
++     * reaching this point. Never make it the only trigger for work that must
++     * happen; treat it as the fast path and keep a recovery path for the rest.
++     *
++     * <p><b>Nothing interrupts this.</b> The watchdog has already been stopped
++     * by the time it runs, so a call that blocks forever hangs the process
++     * forever - no timeout, no crash dump, no restart. Every call must be
++     * bounded work: put timeouts on anything that talks to the network or to
++     * another process. The server logs how long each plugin took and warns past
++     * a threshold of five seconds (see
++     * {@link org.bukkit.plugin.SimplePluginManager#POST_UNLOAD_WARN_MILLIS}), so
++     * a shutdown that got slow can be traced back to the plugin responsible.
++     *
++     * <p>It runs on whichever thread is shutting the server down. That is
++     * usually the main server thread, but on the SIGTERM/Ctrl-C and watchdog
++     * paths it is the shutdown hook or watchdog thread instead, with the main
++     * thread already dead. Do not assume main-thread affinity here.
++     *
++     * <p><b>What still works at this point</b>
++     * <ul>
++     * <li>The plugin's own class loader: classes not loaded yet are still
++     *     loaded on demand, and {@link #getResource(String)} still reads out of
++     *     the plugin jar. The server keeps the jars open until every
++     *     {@code onPostUnload()} has returned.</li>
++     * <li>Logging: {@link #getLogger()} and the console appender are still
++     *     alive. They are shut down immediately afterwards.</li>
++     * <li>Plain file I/O, including {@link #getDataFolder()},
++     *     {@link #getConfig()} and {@link #saveConfig()}.</li>
++     * <li>{@link Server#getWorldContainerPath()}, {@link Server#getName()},
++     *     {@link Server#getVersion()} and the other static server
++     *     properties.</li>
++     * <li>The plugin's own threads and executors, if it started any, and
++     *     {@link java.util.concurrent.ForkJoinPool#commonPool()}. Anything they
++     *     must finish has to be joined before returning.</li>
++     * </ul>
++     *
++     * <p><b>What no longer works</b>
++     * <ul>
++     * <li>{@link org.bukkit.World} and everything reachable from it. The world
++     *     objects are still returned by {@link Server#getWorlds()}, but their
++     *     chunk storage is closed and the level session lock is released;
++     *     touching them corrupts or fails.</li>
++     * <li>The scheduler. Tasks submitted here are never executed, because the
++     *     tick loop and the async task executors are already shut down. The
++     *     server's own worker pools are down as well, so anything dispatched
++     *     onto them is rejected.</li>
++     * <li>The event system. Every listener has been unregistered, so
++     *     {@link PluginManager#callEvent(org.bukkit.event.Event)} reaches
++     *     nobody.</li>
++     * <li>Players, commands, services, plugin messaging and permissions -
++     *     nobody is connected and the registries have been cleared.</li>
++     * <li>Other plugins. They are all disabled, and their state must be
++     *     considered gone even though their objects are still reachable.</li>
++     * </ul>
++     *
++     * @see Server#getWorldContainerPath()
++     */
++    default void onPostUnload() {}
++    // XMine end - postUnload
++
+     /**
+      * Simple boolean if we can still nag to the logs about things
+      *
+diff --git a/src/main/java/org/bukkit/plugin/PluginManager.java b/src/main/java/org/bukkit/plugin/PluginManager.java
+index 86cc5025ad98f7a752c51713b7cd6a39d5136ecc..bbffed75a244bc61350fee6287d2b220a71c1eae 100644
+--- a/src/main/java/org/bukkit/plugin/PluginManager.java
++++ b/src/main/java/org/bukkit/plugin/PluginManager.java
+@@ -94,6 +94,21 @@ public interface PluginManager {
+      */
+     public void disablePlugins();
+ 
++    // XMine start - postUnload
++    /**
++     * Calls {@link Plugin#onPostUnload()} on every loaded plugin, in reverse
++     * load order.
++     * <p>
++     * This is called by the server itself during shutdown, once the worlds
++     * have been saved and closed. Plugins should never call this.
++     * <p>
++     * The default implementation does nothing, so an implementation that does
++     * not support the post-unload phase simply skips it instead of breaking the
++     * shutdown.
++     */
++    default void postUnloadPlugins() {}
++    // XMine end - postUnload
++
+     /**
+      * Disables and removes all plugins
+      */
+diff --git a/src/main/java/org/bukkit/plugin/SimplePluginManager.java b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+index 0e25119564dfa9cb12f3c5dc5f653d7f2c147a9d..94cd54a7db7656624be7feed36f280c9da4e795c 100644
+--- a/src/main/java/org/bukkit/plugin/SimplePluginManager.java
++++ b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+@@ -520,6 +520,115 @@ public final class SimplePluginManager implements PluginManager {
+         }
+     }
+ 
++    // XMine start - postUnload
++    /**
++     * How long a single {@link Plugin#onPostUnload()} may take before the server
++     * logs a warning naming the plugin, in milliseconds. Nothing is interrupted
++     * or aborted - the watchdog is already down by then, so this warning is the
++     * only trace a shutdown-stalling plugin leaves behind.
++     */
++    public static final long POST_UNLOAD_WARN_MILLIS = Long.getLong("xmine.postUnloadWarnMillis", 5000L);
++
++    private boolean shuttingDown = false;
++    private boolean postUnloaded = false;
++    private Plugin[] postUnloadTargets = null;
++
++    /**
++     * Marks the start of the server shutdown sequence, right before the plugins
++     * are disabled.
++     * <p>
++     * Remembers which plugins are still enabled - only those get
++     * {@link Plugin#onPostUnload()} - and tells the plugin loaders to keep the
++     * plugin class loaders open while disabling, so that {@code onPostUnload()}
++     * can still load classes and read resources out of the plugin jars.
++     * A plugin that was already disabled before this point has had its class
++     * loader closed and is deliberately skipped.
++     * <p>
++     * Only the server may call this, and only once: every later call is ignored,
++     * so a plugin cannot leave the loaders deferred behind the server's back and
++     * leak them through the next {@link #clearPlugins()}.
++     * <p>
++     * {@link #postUnloadPlugins()} closes what this kept open.
++     */
++    public synchronized void beginShutdown() {
++        if (shuttingDown) {
++            return;
++        }
++        shuttingDown = true;
++
++        List<Plugin> enabled = new ArrayList<Plugin>();
++        for (Plugin plugin : getPlugins()) {
++            if (plugin.isEnabled()) {
++                enabled.add(plugin);
++            }
++        }
++        this.postUnloadTargets = enabled.toArray(new Plugin[0]);
++
++        for (PluginLoader loader : fileAssociations.values()) {
++            if (loader instanceof org.bukkit.plugin.java.JavaPluginLoader) {
++                ((org.bukkit.plugin.java.JavaPluginLoader) loader).setDeferClassLoaderTeardown(true);
++            }
++        }
++    }
++
++    @Override
++    public void postUnloadPlugins() {
++        Plugin[] plugins;
++        synchronized (this) {
++            if (postUnloaded) {
++                return;
++            }
++            postUnloaded = true;
++            plugins = this.postUnloadTargets;
++        }
++
++        if (plugins == null) {
++            // beginShutdown() never ran, so the class loaders were torn down the
++            // normal way and no plugin can safely run code any more.
++            server.getLogger().warning("Skipping the post-unload phase: it was reached without beginShutdown(), so the plugin class loaders are already closed");
++            plugins = new Plugin[0];
++        }
++
++        // Deliberately outside the lock: onPostUnload() is plugin code and may call back in.
++        long totalStart = System.nanoTime();
++        for (int i = plugins.length - 1; i >= 0; i--) {
++            Plugin plugin = plugins[i];
++            long start = System.nanoTime();
++            try {
++                plugin.onPostUnload();
++            } catch (Throwable ex) {
++                server.getLogger().log(Level.SEVERE, "Error occurred while post-unloading "
++                        + plugin.getDescription().getFullName() + " (Is it up to date?)", ex);
++            } finally {
++                long elapsed = (System.nanoTime() - start) / 1000000L;
++                if (elapsed >= POST_UNLOAD_WARN_MILLIS) {
++                    // Nothing can interrupt onPostUnload(), so naming the slow plugin here is
++                    // the only way to tell a stalled shutdown apart from a hung server.
++                    server.getLogger().warning(plugin.getDescription().getFullName() + " held up the shutdown for "
++                            + elapsed + "ms in onPostUnload(); it must do bounded work");
++                } else if (elapsed > 0) {
++                    server.getLogger().info("Post-unloaded " + plugin.getDescription().getFullName() + " in " + elapsed + "ms");
++                }
++            }
++        }
++        if (plugins.length > 0) {
++            server.getLogger().info("Post-unloaded " + plugins.length + " plugin(s) in "
++                    + ((System.nanoTime() - totalStart) / 1000000L) + "ms");
++        }
++
++        // Now that no plugin code will run again, release the jar handles we kept open.
++        for (PluginLoader loader : fileAssociations.values()) {
++            if (loader instanceof org.bukkit.plugin.java.JavaPluginLoader) {
++                try {
++                    ((org.bukkit.plugin.java.JavaPluginLoader) loader).closeDeferredClassLoaders();
++                } catch (Throwable ex) {
++                    server.getLogger().log(Level.SEVERE, "Error occurred while closing plugin class loaders", ex);
++                }
++            }
++        }
++    }
++    // XMine end - postUnload
++
+     @Override
+     public void disablePlugin(@NotNull final Plugin plugin) {
+         disablePlugin(plugin, false);
+diff --git a/src/main/java/org/bukkit/plugin/java/JavaPlugin.java b/src/main/java/org/bukkit/plugin/java/JavaPlugin.java
+index 04fa3991f6ce4e9dad804f28fc6c947695857089..567343e622543c441414207efae5af72e047c2ab 100644
+--- a/src/main/java/org/bukkit/plugin/java/JavaPlugin.java
++++ b/src/main/java/org/bukkit/plugin/java/JavaPlugin.java
+@@ -333,6 +333,9 @@ public abstract class JavaPlugin extends PluginBase {
+     @Override
+     public void onEnable() {}
+ 
++    @Override
++    public void onPostUnload() {} // XMine - postUnload
++
+     @Nullable
+     @Override
+     public ChunkGenerator getDefaultWorldGenerator(@NotNull String worldName, @Nullable String id) {
+diff --git a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+index b622cedeeee017f042bcf92485d81832030a8030..bf576b6958cec822285e7033bca5b33f8cdb3ff1 100644
+--- a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
++++ b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+@@ -259,6 +259,51 @@ public final class JavaPluginLoader implements PluginLoader {
+         }
+     }
+ 
++    // XMine start - postUnload - defer class loader teardown until after Plugin#onPostUnload
++    private volatile boolean deferLoaderTeardown = false;
++    private final List<PluginClassLoader> deferredLoaders = new CopyOnWriteArrayList<PluginClassLoader>();
++
++    /**
++     * Makes {@link #disablePlugin(Plugin, boolean)} record the plugin class
++     * loaders instead of tearing them down, so that {@link Plugin#onPostUnload()}
++     * can still load classes and read resources out of the plugin jar.
++     * <p>
++     * Only ever enabled by the server itself, for the duration of the shutdown
++     * sequence. Must be paired with {@link #closeDeferredClassLoaders()}.
++     */
++    public void setDeferClassLoaderTeardown(boolean defer) {
++        this.deferLoaderTeardown = defer;
++    }
++
++    /**
++     * Tears down every class loader whose teardown was deferred, and stops
++     * deferring.
++     */
++    public void closeDeferredClassLoaders() {
++        this.deferLoaderTeardown = false;
++        for (PluginClassLoader loader : deferredLoaders) {
++            teardownClassLoader(loader);
++        }
++        deferredLoaders.clear();
++    }
++
++    private void teardownClassLoader(@NotNull PluginClassLoader loader) {
++        loaders.remove(loader);
++
++        Collection<Class<?>> classes = loader.getClasses();
++
++        for (Class<?> clazz : classes) {
++            removeClass(clazz);
++        }
++
++        try {
++            loader.close();
++        } catch (IOException ex) {
++            //
++        }
++    }
++    // XMine end - postUnload
++
+     private void removeClass(@NotNull Class<?> clazz) {
+         if (ConfigurationSerializable.class.isAssignableFrom(clazz)) {
+             Class<? extends ConfigurationSerializable> serializable = clazz.asSubclass(ConfigurationSerializable.class);
+@@ -409,19 +454,13 @@ public final class JavaPluginLoader implements PluginLoader {
+ 
+             if (cloader instanceof PluginClassLoader) {
+                 PluginClassLoader loader = (PluginClassLoader) cloader;
+-                loaders.remove(loader);
+-
+-                Collection<Class<?>> classes = loader.getClasses();
+-
+-                for (Class<?> clazz : classes) {
+-                    removeClass(clazz);
+-                }
+-
+-                try {
+-                    loader.close();
+-                } catch (IOException ex) {
+-                    //
++                // XMine start - postUnload - keep the class loader usable until Plugin#onPostUnload has run
++                if (this.deferLoaderTeardown) {
++                    this.deferredLoaders.add(loader);
++                    return;
+                 }
++                teardownClassLoader(loader);
++                // XMine end - postUnload
+                 // Paper start - close Class Loader on disable
+                 try {
+                     if (closeClassloader) {
