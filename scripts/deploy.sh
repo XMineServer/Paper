@@ -69,9 +69,22 @@ export PATH="$JAVA_HOME/bin:$PATH"
 echo "Using JAVA_HOME=$JAVA_HOME"
 
 # --- credential check ------------------------------------------------------
+# Checked before the build, because the build takes minutes and the upload is
+# the very last step: a bad credential otherwise surfaces as a 401 after all
+# the waiting.
 settings="${HOME}/.m2/settings.xml"
 if [[ ! -f "$settings" ]] || ! grep -q "xmine-snapshots" "$settings"; then
     echo "No 'xmine-snapshots' server entry in $settings - deploy would fail with 401." >&2
+    exit 1
+fi
+# The presence of the server id is not enough. The shipped settings.xml is a
+# template with REPLACE_WITH_TOKEN_NAME / REPLACE_WITH_TOKEN_SECRET in it, and
+# an id check happily passes on it - which is exactly how a full build once
+# ended in a 401 at the upload step.
+if grep -q "REPLACE_WITH_" "$settings"; then
+    echo "$settings still contains template placeholders (REPLACE_WITH_...)." >&2
+    echo "Put a real Reposilite token into the xmine-releases / xmine-snapshots" >&2
+    echo "server entries - otherwise the upload fails with 401." >&2
     exit 1
 fi
 
@@ -101,13 +114,27 @@ echo "Minecraft version : $mcver"
 # already shipped this". Check up front and say so plainly.
 if [[ "$do_paperclip" == 1 ]]; then
     existing="$(curl -sS -o /dev/null -w '%{http_code}' -m 30 "$paperclip_url" || echo 000)"
-    if [[ "$existing" == "200" ]]; then
-        echo "" >&2
-        echo "Version $paperclip_version is already published at $paperclip_url" >&2
-        echo "Release versions are immutable. Commit your changes (the version follows the" >&2
-        echo "commit count) or pass --version with a new number." >&2
-        exit 1
-    fi
+    case "$existing" in
+        200)
+            echo "" >&2
+            echo "Version $paperclip_version is already published at $paperclip_url" >&2
+            echo "Release versions are immutable. Commit your changes (the version follows the" >&2
+            echo "commit count) or pass --version with a new number." >&2
+            exit 1
+            ;;
+        404) ;;   # free, go ahead
+        *)
+            # A timeout or a TLS drop here is NOT proof that the version is free,
+            # and treating it as such is how you find out mid-upload. This has
+            # already happened once: the repository was briefly unreachable and
+            # the check silently passed.
+            echo "" >&2
+            echo "Could not determine whether $paperclip_version is already published" >&2
+            echo "(HTTP status '$existing' from $paperclip_url)." >&2
+            echo "Refusing to guess - check the repository and retry." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # --- build -----------------------------------------------------------------
@@ -129,9 +156,31 @@ if [[ "$do_paperclip" == 1 ]]; then
     if [[ "$do_build" == 1 || ! -f "$basedir/paperclip.jar" ]]; then
         scripts/paperclip.sh "$basedir"
     fi
+    # Явный pom обязателен. Без -DpomFile плагин deploy-file берёт pom, вшитый
+    # в сам jar (META-INF/maven/io.papermc/paperclip-java8/pom.xml), и публикует
+    # его как есть: артефакт лежит по адресу ru.xmine.paper:paperclip:<версия>,
+    # а внутри pom объявляет io.papermc:paperclip-java8:1.4.1-SNAPSHOT — да ещё
+    # и со SNAPSHOT-зависимостью внутри релизного репозитория. Для скачивания по
+    # прямому URL это безразлично, но любой, кто попробует подтянуть paperclip
+    # как maven-зависимость, упрётся в несуществующие координаты.
+    pom_file="$(mktemp -t paperclip-pom-XXXXXX.xml)"
+    trap 'rm -f "$pom_file"' EXIT
+    cat > "$pom_file" <<POM
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>ru.xmine.paper</groupId>
+  <artifactId>paperclip</artifactId>
+  <version>${paperclip_version}</version>
+  <packaging>jar</packaging>
+  <name>XMine Paper (paperclip)</name>
+  <description>Runnable Paper server for Minecraft ${mcver}, built from the XMine fork.</description>
+</project>
+POM
+
     mvn deploy:deploy-file \
         -Durl="$paperclip_repo_url" \
         -DrepositoryId="$paperclip_repo_id" \
+        -DpomFile="$pom_file" \
         -DgroupId=ru.xmine.paper \
         -DartifactId=paperclip \
         -Dversion="$paperclip_version" \
