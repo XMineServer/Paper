@@ -42,14 +42,15 @@
         </repository>
     </repositories>
 
+    <!-- XMine - publish this fork to our own Reposilite instead of papermc.io (dead) -->
     <distributionManagement>
         <repository>
-            <id>papermc-releases</id>
-            <url>https://papermc.io/repo/repository/maven-releases/</url>
+            <id>xmine-releases</id>
+            <url>https://maven.xmine.world/releases</url>
         </repository>
         <snapshotRepository>
-            <id>papermc-snapshots</id>
-            <url>https://papermc.io/repo/repository/maven-snapshots/</url>
+            <id>xmine-snapshots</id>
+            <url>https://maven.xmine.world/snapshots</url>
         </snapshotRepository>
     </distributionManagement>
 </project>
