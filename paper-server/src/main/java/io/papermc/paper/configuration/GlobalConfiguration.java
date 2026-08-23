@@ -120,6 +120,25 @@ public class GlobalConfiguration extends ConfigurationPart {
             public boolean onlineMode = true;
             public String secret = "";
 
+            // XMine start - секрет не записывается обратно в paper-global.yml
+            // Configurations#initializeGlobalConfiguration после загрузки делает
+            // node.set(type, instance) и сохраняет узел обратно в файл. Всё, что @PostProcess
+            // записал в поле, уезжает на диск - то есть апстримная поддержка
+            // PAPER_VELOCITY_SECRET пишет секрет в config/paper-global.yml при первом же
+            // старте, ровно туда, откуда его и убирали. Разрешённое значение поэтому живёт
+            // в transient-поле: Configurate сериализует только не-static и не-transient поля,
+            // так что на диске остаётся то, что там было.
+            private transient String resolvedSecret = "";
+
+            /**
+             * The secret actually in use, resolved from PAPER_VELOCITY_SECRET_FILE, then
+             * PAPER_VELOCITY_SECRET, then this file. Read this instead of {@link #secret}.
+             */
+            public String secret() {
+                return this.resolvedSecret;
+            }
+            // XMine end - секрет не записывается обратно в paper-global.yml
+
             // XMine start - секрет Velocity-форвардинга из файла
             // Апстрим уже умеет читать PAPER_VELOCITY_SECRET. XMine добавляет источник
             // с более высоким приоритетом - PAPER_VELOCITY_SECRET_FILE: секрет не должен
@@ -138,26 +157,27 @@ public class GlobalConfiguration extends ConfigurationPart {
                 // proxies.velocity.secret из paper-global.yml. Сам секрет в лог не попадает
                 // ни целиком, ни частично - логируется только его источник.
                 String secretSource = "config (proxies.velocity.secret)";
+                this.resolvedSecret = this.secret;
                 final String fileSourcedVelocitySecret = readSecretFile(System.getenv(SECRET_FILE_ENV));
                 // XMine end - секрет Velocity-форвардинга из файла
 
                 final String environmentSourcedVelocitySecret = System.getenv("PAPER_VELOCITY_SECRET");
                 if (environmentSourcedVelocitySecret != null && !environmentSourcedVelocitySecret.isEmpty()) {
-                    this.secret = environmentSourcedVelocitySecret;
+                    this.resolvedSecret = environmentSourcedVelocitySecret; // XMine - не this.secret: иначе уедет на диск
                     secretSource = "the PAPER_VELOCITY_SECRET environment variable"; // XMine - секрет Velocity-форвардинга из файла
                 }
 
                 // XMine start - секрет Velocity-форвардинга из файла
                 if (fileSourcedVelocitySecret != null) {
-                    this.secret = fileSourcedVelocitySecret;
+                    this.resolvedSecret = fileSourcedVelocitySecret;
                     secretSource = "the file pointed to by " + SECRET_FILE_ENV;
                 }
-                if (!this.secret.isEmpty()) {
+                if (!this.resolvedSecret.isEmpty()) {
                     LOGGER.info("Velocity IP forwarding: secret loaded from {}", secretSource);
                 }
                 // XMine end - секрет Velocity-форвардинга из файла
 
-                if (this.secret.isEmpty()) {
+                if (this.resolvedSecret.isEmpty()) {
                     LOGGER.error("Velocity is enabled, but no secret key was specified. A secret key is required. Disabling velocity...");
                     this.enabled = false;
                 }
