@@ -13,6 +13,7 @@ public class YamlConfigurationOptions extends FileConfigurationOptions {
     private int indent = 2;
     private int width = 80;
     private int codePointLimit = Integer.MAX_VALUE; // Paper - use upstream's default from YamlConfiguration
+    private boolean substituteEnvironmentVariables = io.papermc.paper.configuration.EnvironmentSubstitutor.enabledByDefault(); // XMine - подстановка переменных среды
 
     protected YamlConfigurationOptions(@NotNull YamlConfiguration configuration) {
         super(configuration);
@@ -148,4 +149,38 @@ public class YamlConfigurationOptions extends FileConfigurationOptions {
         return this;
     }
     // Paper end
+
+    // XMine start - подстановка переменных среды
+    /**
+     * Gets whether environment variable references such as <code>${DB_HOST}</code> are expanded
+     * while the configuration is read.
+     * <p>
+     * The default comes from the {@value io.papermc.paper.configuration.EnvironmentSubstitutor#SYSTEM_PROPERTY}
+     * system property and is {@code true} unless that property is set to {@code false}.
+     *
+     * @return whether environment variables are substituted on load
+     * @see io.papermc.paper.configuration.EnvironmentSubstitutor
+     */
+    public boolean substituteEnvironmentVariables() {
+        return this.substituteEnvironmentVariables;
+    }
+
+    /**
+     * Sets whether environment variable references such as <code>${DB_HOST}</code> are expanded
+     * while the configuration is read.
+     * <p>
+     * This has to be set before {@link YamlConfiguration#load(java.io.File)} or
+     * {@link YamlConfiguration#loadFromString(String)} is called; substitution happens once, at
+     * load time, and turning it off afterwards does not undo it.
+     *
+     * @param value whether environment variables should be substituted on load
+     * @return This object, for chaining
+     * @see io.papermc.paper.configuration.EnvironmentSubstitutor
+     */
+    @NotNull
+    public YamlConfigurationOptions substituteEnvironmentVariables(boolean value) {
+        this.substituteEnvironmentVariables = value;
+        return this;
+    }
+    // XMine end - подстановка переменных среды
 }

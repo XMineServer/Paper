@@ -1,6 +1,12 @@
 package org.bukkit.configuration.file;
 
 import com.google.common.base.Preconditions;
+// XMine start - подстановка переменных среды
+import io.papermc.paper.configuration.EnvironmentSubstitutor;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.regex.Pattern;
+// XMine end - подстановка переменных среды
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -19,6 +25,7 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.serialization.ConfigurationSerialization;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable; // XMine - подстановка переменных среды
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -54,6 +61,26 @@ public class YamlConfiguration extends FileConfiguration {
     private final YamlConstructor constructor;
     private final YamlRepresenter representer;
     private final Yaml yaml;
+    // XMine start - подстановка переменных среды
+    /**
+     * Templates recorded while loading, keyed by the structural path to the scalar they came
+     * from (map keys as strings, sequence positions as ints). {@link #saveToString()} puts the
+     * template back so that a plugin rewriting its own configuration does not freeze the
+     * expanded value - and, in the case that motivated this feature, a secret - onto disk.
+     */
+    private final Map<List<Object>, EnvironmentTemplate> environmentTemplates = new HashMap<>();
+    /**
+     * A decimal integer whose {@code toString} is byte-for-byte what was read. Anything else -
+     * {@code 0755}, {@code 1_000}, {@code 0x1F}, {@code -0} - is deliberately left as a string:
+     * YAML 1.1 would turn {@code 0755} into 493, and the value written back on the next save
+     * would no longer be the value the operator supplied.
+     */
+    private static final Pattern CANONICAL_INT = Pattern.compile("0|-?[1-9][0-9]*");
+    private static final Pattern CANONICAL_FLOAT = Pattern.compile("-?(?:0|[1-9][0-9]*)\\.[0-9]+");
+
+    private record EnvironmentTemplate(String template, String substituted, Tag tag, DumperOptions.ScalarStyle style) {
+    }
+    // XMine end - подстановка переменных среды
 
     public YamlConfiguration() {
         yamlDumperOptions = new DumperOptions();
@@ -78,6 +105,7 @@ public class YamlConfiguration extends FileConfiguration {
         yamlDumperOptions.setProcessComments(options().parseComments());
 
         MappingNode node = toNodeTree(this);
+        restoreEnvironmentTemplates(node, new ArrayList<>()); // XMine - подстановка переменных среды
 
         node.setBlockComments(getCommentLines(saveHeader(options().getHeader()), CommentType.BLOCK));
         node.setEndComments(getCommentLines(options().getFooter(), CommentType.BLOCK));
@@ -113,14 +141,219 @@ public class YamlConfiguration extends FileConfiguration {
         }
 
         this.map.clear();
+        this.environmentTemplates.clear(); // XMine - подстановка переменных среды
 
         if (node != null) {
             adjustNodeComments(node);
             options().setHeader(loadHeader(getCommentLines(node.getBlockComments())));
             options().setFooter(getCommentLines(node.getEndComments()));
+            // XMine start - подстановка переменных среды
+            // Deliberately after compose() and before construction: the document has already
+            // been parsed, so an expanded value can neither change the structure of the file
+            // nor turn a parse error message into a place a secret can appear.
+            if (options().substituteEnvironmentVariables()) {
+                substituteEnvironment(node, new ArrayList<>(), new IdentityHashMap<>());
+            }
+            // XMine end - подстановка переменных среды
             fromNodeTree(node, this);
         }
     }
+
+    // XMine start - подстановка переменных среды
+    /**
+     * Looks up an environment variable. Overridable so that tests - and any future caller that
+     * wants a different source of values - do not have to mutate the real process environment.
+     *
+     * @param name the variable name
+     * @return its value, or {@code null} if it is not set
+     */
+    @org.jetbrains.annotations.ApiStatus.Internal
+    @Nullable
+    protected String environmentValue(@NotNull String name) {
+        return System.getenv(name);
+    }
+
+    /**
+     * Rewrites scalars containing environment references, in place, on the composed node tree.
+     *
+     * @param node the node to visit
+     * @param path the structural path to {@code node}
+     * @param replaced scalars already replaced, so that YAML aliases follow their anchor
+     * @return a node that must take {@code node}'s place in its parent, or {@code null}
+     */
+    @Nullable
+    private Node substituteEnvironment(@NotNull Node node, @NotNull List<Object> path, @NotNull Map<Node, Node> replaced) {
+        if (node instanceof AnchorNode anchorNode) {
+            // An alias resolves to the very node its anchor defined; if that node was replaced,
+            // the alias has to point at the replacement.
+            return replaced.get(anchorNode.getRealNode());
+        }
+
+        if (node instanceof MappingNode mappingNode) {
+            List<NodeTuple> tuples = mappingNode.getValue();
+            List<NodeTuple> rebuilt = null;
+            for (int i = 0; i < tuples.size(); i++) {
+                NodeTuple tuple = tuples.get(i);
+                Node key = tuple.getKeyNode();
+                // Keys are never substituted: a key is a path segment, and rewriting one would
+                // move settings around behind the plugin's back.
+                path.add(key instanceof ScalarNode scalarKey ? scalarKey.getValue() : Integer.valueOf(i));
+                Node replacement = substituteEnvironment(tuple.getValueNode(), path, replaced);
+                path.remove(path.size() - 1);
+                if (replacement != null) {
+                    if (rebuilt == null) {
+                        rebuilt = new ArrayList<>(tuples);
+                    }
+                    rebuilt.set(i, new NodeTuple(key, replacement));
+                }
+            }
+            if (rebuilt != null) {
+                mappingNode.setValue(rebuilt);
+            }
+            return null;
+        }
+
+        if (node instanceof SequenceNode sequenceNode) {
+            List<Node> values = sequenceNode.getValue();
+            for (int i = 0; i < values.size(); i++) {
+                path.add(i);
+                Node replacement = substituteEnvironment(values.get(i), path, replaced);
+                path.remove(path.size() - 1);
+                if (replacement != null) {
+                    values.set(i, replacement);
+                }
+            }
+            return null;
+        }
+
+        if (!(node instanceof ScalarNode scalarNode)) {
+            return null;
+        }
+
+        String template = scalarNode.getValue();
+        String substituted = EnvironmentSubstitutor.substitute(template, this::environmentValue);
+        if (substituted == null) {
+            return null;
+        }
+
+        Tag tag = scalarNode.getTag();
+        DumperOptions.ScalarStyle style = scalarNode.getScalarStyle();
+        // An unquoted "${PORT}" should behave like the number it expands to, so that getInt()
+        // works. A quoted one stays a string, exactly as a quoted literal would have.
+        Tag substitutedTag = scalarNode.isPlain() && Tag.STR.equals(tag) ? implicitTag(substituted) : tag;
+
+        ScalarNode replacement = new ScalarNode(substitutedTag, substituted, scalarNode.getStartMark(), scalarNode.getEndMark(), style);
+        replacement.setBlockComments(scalarNode.getBlockComments());
+        replacement.setInLineComments(scalarNode.getInLineComments());
+        replacement.setEndComments(scalarNode.getEndComments());
+
+        this.environmentTemplates.put(List.copyOf(path), new EnvironmentTemplate(template, substituted, tag, style));
+        replaced.put(scalarNode, replacement);
+        return replacement;
+    }
+
+    /**
+     * Resolves the implicit YAML tag of an expanded scalar, but only where the value survives a
+     * round trip unchanged. Everything else stays a string rather than risk saving back a value
+     * the operator never wrote.
+     *
+     * @param value the expanded scalar text
+     * @return the tag to give the scalar
+     */
+    @NotNull
+    private static Tag implicitTag(@NotNull String value) {
+        if (value.isEmpty()) {
+            return Tag.STR; // an empty expansion is an empty string, not null
+        }
+        if (CANONICAL_INT.matcher(value).matches()) {
+            return Tag.INT;
+        }
+        if (value.equals("true") || value.equals("false")) {
+            return Tag.BOOL; // not "yes"/"on": those would come back as "true" on the next save
+        }
+        if (CANONICAL_FLOAT.matcher(value).matches()) {
+            try {
+                if (Double.toString(Double.parseDouble(value)).equals(value)) {
+                    return Tag.FLOAT;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        // Everything else - timestamps, sexagesimals, "~", "yes" - stays a string on purpose:
+        // the whitelist above is exactly the set of values that survive a save unchanged.
+        return Tag.STR;
+    }
+
+    /**
+     * Puts recorded templates back into the node tree that is about to be written out.
+     * <p>
+     * A value is only restored when what is about to be saved still equals what the template
+     * expanded to. If a plugin has since changed the setting, that new value is written as-is -
+     * a deliberate change must never be silently reverted to a template.
+     *
+     * @param node the node to visit
+     * @param path the structural path to {@code node}
+     */
+    private void restoreEnvironmentTemplates(@NotNull Node node, @NotNull List<Object> path) {
+        if (this.environmentTemplates.isEmpty()) {
+            return;
+        }
+
+        if (node instanceof MappingNode mappingNode) {
+            List<NodeTuple> tuples = mappingNode.getValue();
+            List<NodeTuple> rebuilt = null;
+            for (int i = 0; i < tuples.size(); i++) {
+                NodeTuple tuple = tuples.get(i);
+                if (!(tuple.getKeyNode() instanceof ScalarNode scalarKey)) {
+                    continue;
+                }
+                path.add(scalarKey.getValue());
+                Node value = tuple.getValueNode();
+                ScalarNode restored = restoreEnvironmentTemplate(value, path);
+                if (restored != null) {
+                    if (rebuilt == null) {
+                        rebuilt = new ArrayList<>(tuples);
+                    }
+                    rebuilt.set(i, new NodeTuple(tuple.getKeyNode(), restored));
+                } else {
+                    restoreEnvironmentTemplates(value, path);
+                }
+                path.remove(path.size() - 1);
+            }
+            if (rebuilt != null) {
+                mappingNode.setValue(rebuilt);
+            }
+        } else if (node instanceof SequenceNode sequenceNode) {
+            List<Node> values = sequenceNode.getValue();
+            for (int i = 0; i < values.size(); i++) {
+                path.add(i);
+                ScalarNode restored = restoreEnvironmentTemplate(values.get(i), path);
+                if (restored != null) {
+                    values.set(i, restored);
+                } else {
+                    restoreEnvironmentTemplates(values.get(i), path);
+                }
+                path.remove(path.size() - 1);
+            }
+        }
+    }
+
+    @Nullable
+    private ScalarNode restoreEnvironmentTemplate(@NotNull Node node, @NotNull List<Object> path) {
+        if (!(node instanceof ScalarNode scalarNode)) {
+            return null;
+        }
+        EnvironmentTemplate template = this.environmentTemplates.get(path);
+        if (template == null || !template.substituted().equals(scalarNode.getValue())) {
+            return null;
+        }
+        ScalarNode restored = new ScalarNode(template.tag(), template.template(), null, null, template.style());
+        restored.setBlockComments(scalarNode.getBlockComments());
+        restored.setInLineComments(scalarNode.getInLineComments());
+        restored.setEndComments(scalarNode.getEndComments());
+        return restored;
+    }
+    // XMine end - подстановка переменных среды
 
     /**
      * This method splits the header on the last empty line, and sets the
