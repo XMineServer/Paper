@@ -78,7 +78,10 @@ public class YamlConfiguration extends FileConfiguration {
     private static final Pattern CANONICAL_INT = Pattern.compile("0|-?[1-9][0-9]*");
     private static final Pattern CANONICAL_FLOAT = Pattern.compile("-?(?:0|[1-9][0-9]*)\\.[0-9]+");
 
-    private record EnvironmentTemplate(String template, String substituted, Tag tag, DumperOptions.ScalarStyle style) {
+    // @NotNull on the components so that the generated accessors carry it: AnnotationTest
+    // requires every object-returning method under org/bukkit to be annotated.
+    private record EnvironmentTemplate(@NotNull String template, @NotNull String substituted, @NotNull Tag tag,
+                                       @NotNull DumperOptions.ScalarStyle style) {
     }
     // XMine end - подстановка переменных среды
 
