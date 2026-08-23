@@ -120,20 +120,75 @@ public class GlobalConfiguration extends ConfigurationPart {
             public boolean onlineMode = true;
             public String secret = "";
 
+            // XMine start - секрет Velocity-форвардинга из файла
+            // Апстрим уже умеет читать PAPER_VELOCITY_SECRET. XMine добавляет источник
+            // с более высоким приоритетом - PAPER_VELOCITY_SECRET_FILE: секрет не должен
+            // лежать ни в paper-global.yml (файл в примонтированном томе, его читают
+            // разработчики и read-only учётки), ни в переменной среды (она видна в
+            // `docker inspect` и в /proc/<pid>/environ).
+            private static final String SECRET_FILE_ENV = "PAPER_VELOCITY_SECRET_FILE";
+            // XMine end - секрет Velocity-форвардинга из файла
+
             @PostProcess
             private void postProcess() {
                 if (!this.enabled) return;
 
+                // XMine start - секрет Velocity-форвардинга из файла
+                // Порядок приоритета: PAPER_VELOCITY_SECRET_FILE -> PAPER_VELOCITY_SECRET ->
+                // proxies.velocity.secret из paper-global.yml. Сам секрет в лог не попадает
+                // ни целиком, ни частично - логируется только его источник.
+                String secretSource = "config (proxies.velocity.secret)";
+                final String fileSourcedVelocitySecret = readSecretFile(System.getenv(SECRET_FILE_ENV));
+                // XMine end - секрет Velocity-форвардинга из файла
+
                 final String environmentSourcedVelocitySecret = System.getenv("PAPER_VELOCITY_SECRET");
                 if (environmentSourcedVelocitySecret != null && !environmentSourcedVelocitySecret.isEmpty()) {
                     this.secret = environmentSourcedVelocitySecret;
+                    secretSource = "the PAPER_VELOCITY_SECRET environment variable"; // XMine - секрет Velocity-форвардинга из файла
                 }
+
+                // XMine start - секрет Velocity-форвардинга из файла
+                if (fileSourcedVelocitySecret != null) {
+                    this.secret = fileSourcedVelocitySecret;
+                    secretSource = "the file pointed to by " + SECRET_FILE_ENV;
+                }
+                if (!this.secret.isEmpty()) {
+                    LOGGER.info("Velocity IP forwarding: secret loaded from {}", secretSource);
+                }
+                // XMine end - секрет Velocity-форвардинга из файла
 
                 if (this.secret.isEmpty()) {
                     LOGGER.error("Velocity is enabled, but no secret key was specified. A secret key is required. Disabling velocity...");
                     this.enabled = false;
                 }
             }
+
+            // XMine start - секрет Velocity-форвардинга из файла
+            // Возвращает содержимое файла-секрета или null, если переменная не задана либо
+            // файл прочитать не удалось. Нечитаемый или пустой файл - это ошибка
+            // конфигурации, а не повод молча свалиться на следующий источник, поэтому о ней
+            // громко сообщается в лог (без содержимого файла, только путь).
+            private static @Nullable String readSecretFile(final @Nullable String path) {
+                if (path == null || path.isEmpty()) {
+                    return null;
+                }
+                final String secret;
+                try {
+                    secret = java.nio.file.Files.readString(java.nio.file.Path.of(path), java.nio.charset.StandardCharsets.UTF_8);
+                } catch (final java.io.IOException | java.nio.file.InvalidPathException ex) {
+                    LOGGER.error("Could not read the Velocity forwarding secret from the file pointed to by {} ({}): {}", SECRET_FILE_ENV, path, ex.getMessage());
+                    return null;
+                }
+                // У файлов-секретов почти всегда есть завершающий перевод строки,
+                // в ключ HMAC он попасть не должен.
+                final String trimmed = secret.stripTrailing();
+                if (trimmed.isEmpty()) {
+                    LOGGER.error("The Velocity forwarding secret file pointed to by {} ({}) is empty", SECRET_FILE_ENV, path);
+                    return null;
+                }
+                return trimmed;
+            }
+            // XMine end - секрет Velocity-форвардинга из файла
         }
         public boolean proxyProtocol = false;
         public boolean isProxyOnlineMode() {
