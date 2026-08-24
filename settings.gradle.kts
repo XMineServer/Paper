@@ -57,14 +57,24 @@ fun optionalInclude(name: String, op: (ProjectDescriptor.() -> Unit)? = null) {
 
 gradle.lifecycle.beforeProject {
     val mcVersion = providers.gradleProperty("mcVersion").get().trim()
-    val paperVersionChannel = providers.gradleProperty("channel").get().trim()
     val paperBuildNumber = providers.environmentVariable("BUILD_NUMBER").orNull?.trim()?.toInt()
-    val versionString = if (paperBuildNumber == null) {
-        "$mcVersion.local-SNAPSHOT"
+    // XMine start - своя версия
+    //
+    // Суффикс -xmine не косметика: артефакты форка лежат в своём Reposilite под
+    // теми же координатами io.papermc.paper, что и апстримные, и версия -
+    // единственное, что отличает нашу сборку от чужой. Без него нельзя ни
+    // прочитать по адресу, что за jar стоит на ноде, ни защититься от того, что
+    // упавшая в другой репозиторий сборка подменит апстримную.
+    //
+    // BUILD_NUMBER задан -> релиз с неизменяемым адресом (26.1.2-xmine.7).
+    // Не задан -> снапшот (26.1.2-xmine-SNAPSHOT), перезаписываемый.
+    // По этому же суффиксу выбирается раздел Reposilite, см. build.gradle.kts.
+    version = if (paperBuildNumber == null) {
+        "$mcVersion-xmine-SNAPSHOT"
     } else {
-        "$mcVersion.build.$paperBuildNumber-${paperVersionChannel.lowercase()}"
+        "$mcVersion-xmine.$paperBuildNumber"
     }
-    version = versionString
+    // XMine end - своя версия
 }
 
 if (providers.gradleProperty("paperBuildCacheEnabled").orNull.toBoolean()) {

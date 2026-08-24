@@ -50,6 +50,38 @@ subprojects {
                 name = "paperReleases"
                 credentials(PasswordCredentials::class)
             }
+            // XMine start - свой Reposilite
+            //
+            // Раздел выбирается по версии, а не задаётся руками: снапшот в
+            // releases отвергнется репозиторием, релиз в snapshots потеряет
+            // неизменяемость адреса. Ошибиться тут нечем.
+            //
+            // Имена свойств учётки - те же, что у остальных проектов XMine
+            // (XMinePlugins, XDiscovery, XMineTrafficTracker): локально
+            // ~/.gradle/gradle.properties, в CI - переменные окружения. Здесь
+            // НЕ credentials(PasswordCredentials::class): та форма потребовала
+            // бы своих xmineUsername/xminePassword и развела бы форк с
+            // остальными репозиториями по учёткам.
+            maven {
+                name = "xmine"
+                val base = providers.gradleProperty("xmineMavenUrl")
+                    .getOrElse("https://maven.xmine.world")
+                val section = if (project.version.toString().endsWith("-SNAPSHOT")) {
+                    "snapshots"
+                } else {
+                    "releases"
+                }
+                url = uri("$base/$section")
+                credentials {
+                    username = providers.gradleProperty("xmineMavenUsername")
+                        .orElse(providers.environmentVariable("XMINE_MAVEN_USERNAME"))
+                        .orNull
+                    password = providers.gradleProperty("xmineMavenPassword")
+                        .orElse(providers.environmentVariable("XMINE_MAVEN_PASSWORD"))
+                        .orNull
+                }
+            }
+            // XMine end - свой Reposilite
         }
     }
 }

@@ -315,6 +315,26 @@ tasks.registerRunTask("runPaperclip") {
     mainClass.set(null as String?)
 }
 
+// XMine start - публикация paperclip координатой
+//
+// Апстрим paperclip в Maven НЕ публикует вообще: готовый jar уходит в сервис
+// PaperMC через плагин fill (задача publishToFill), а в Maven едут только
+// paper-api, paper-mojangapi и dev-bundle. Нам сервис PaperMC не нужен и
+// недоступен, а ноде нужен постоянный адрес, по которому она возьмёт ядро, -
+// поэтому paperclip публикуется как обычный артефакт.
+//
+// Расширение задаётся явно: задача называет свой выход outputZip, и без этого
+// артефакт уехал бы в репозиторий с расширением .zip.
+publishing {
+    publications.create<MavenPublication>("paperclip") {
+        artifactId = "paperclip"
+        artifact(tasks.createPaperclipJar.flatMap { it.outputZip }) {
+            extension = "jar"
+        }
+    }
+}
+// XMine end - публикация paperclip координатой
+
 fill {
     project("paper")
     versionFamily(paperweight.minecraftVersion.map { it.split(".", "-").takeWhile { part -> part.toIntOrNull() != null }.take(2).joinToString(".") })
