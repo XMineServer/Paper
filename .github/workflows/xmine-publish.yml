@@ -62,18 +62,57 @@ jobs:
         run: |
           # BUILD_NUMBER задан -> релиз 26.1.2-xmine.<N> в раздел releases.
           # Не задан -> 26.1.2-xmine-SNAPSHOT в snapshots. Логика в
-          # settings.gradle.kts, здесь только выбор режима.
-          #
-          # Номер берётся из github.run_number и потому НЕ сплошной: счётчик
-          # растёт и на снапшотных прогонах тоже. Это допустимо - от номера
-          # сборки требуется уникальность и рост, а не отсутствие пропусков.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-             && [ "${{ inputs.release }}" = "true" ]; then
-            echo "BUILD_NUMBER=${{ github.run_number }}" >> "$GITHUB_ENV"
-            echo "kind=release" >> "$GITHUB_OUTPUT"
-          else
+          # settings.gradle.kts, здесь только выбор режима и номера.
+          set -eu
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] \
+             || [ "${{ inputs.release }}" != "true" ]; then
             echo "kind=snapshot" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # Номер СЧИТАЕТСЯ ИЗ УЖЕ ОПУБЛИКОВАННОГО, а не из github.run_number.
+          #
+          # run_number растёт на каждом прогоне этого файла - и на снапшотных, и
+          # на упавших, - поэтому дал бы дырки в нумерации релизов. А так номер
+          # означает ровно «N-й выпущенный релиз этой версии Minecraft», и
+          # пропуск невозможен по построению: источник истины - сам репозиторий,
+          # где версии и лежат.
+          #
+          # Нумерация своя у каждой версии Minecraft: у 26.1.3 отсчёт начнётся
+          # заново с 1.
+          MC="$(sed -n 's/^mcVersion=//p' gradle.properties | tr -d '[:space:]')"
+          echo "Minecraft version: $MC"
+
+          NEXT="$(python3 - "$MC" <<'PY'
+          import re, sys, urllib.error, urllib.request
+          import xml.etree.ElementTree as ET
+
+          BASE = "https://maven.xmine.world/releases/io/papermc/paper/paperclip"
+          mc = sys.argv[1]
+          try:
+              with urllib.request.urlopen(f"{BASE}/maven-metadata.xml", timeout=30) as response:
+                  meta = response.read()
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404:
+                  raise
+              meta = None          # ни одного релиза ещё нет
+          if meta is None:
+              print(1)
+              sys.exit(0)
+
+          pattern = re.compile(rf"^{re.escape(mc)}-xmine\.(\d+)$")
+          numbers = [
+              int(m.group(1))
+              for v in ET.fromstring(meta).findall("./versioning/versions/version")
+              if (m := pattern.match((v.text or "").strip()))
+          ]
+          print(max(numbers, default=0) + 1)
+          PY
+          )"
+
+          echo "BUILD_NUMBER=$NEXT" >> "$GITHUB_ENV"
+          echo "kind=release" >> "$GITHUB_OUTPUT"
+          echo "Next release build number: $NEXT"
 
       - name: Fail early without credentials
         run: |
