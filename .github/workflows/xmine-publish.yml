@@ -1,0 +1,107 @@
+# Публикация ядра XMine в свой Reposilite.
+#
+# ЭТОТ РЕПОЗИТОРИЙ ПУБЛИЧНЫЙ, поэтому `runs-on` здесь — только раннеры GitHub и
+# никогда `self-hosted`. Правило записано в вики (infra/ci.md, «Граница
+# безопасности: только приватные репозитории») и `Paper` в нём назван поимённо:
+# 17.08.2026 его убрали из группы раннеров `xmine-ci`. Причина в том, что PR из
+# чужого форка исполняет workflow ИЗ САМОГО PR, то есть автор форка волен
+# дописать `runs-on: self-hosted` и получить исполнение своего кода на хосте, где
+# работает игровой сервер.
+#
+# Отсюда же остальные меры: триггера `pull_request` нет вовсе, push ограничен
+# нашими ветками, а job не запускается в форках самого форка.
+
+name: XMine - publish core
+
+on:
+  push:
+    branches: ['xmine/**']
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish an immutable release instead of a snapshot'
+        type: boolean
+        default: false
+
+# Публикация не должна идти в два потока: снапшот перезаписывается, и параллельные
+# сборки означали бы гонку за то, чья попадёт под плавающую координату.
+concurrency:
+  group: xmine-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # Форки самого форка не должны пытаться публиковать в наш Reposilite.
+    if: github.repository == 'XMineServer/Paper'
+    runs-on: ubuntu-latest
+
+    env:
+      XMINE_MAVEN_USERNAME: ${{ secrets.XMINE_MAVEN_USERNAME }}
+      XMINE_MAVEN_PASSWORD: ${{ secrets.XMINE_MAVEN_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # applyPatches работает с историей, на мелком клоне он не отработает.
+          fetch-depth: 0
+
+      - name: JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: 25
+          distribution: 'zulu'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decide version
+        id: version
+        run: |
+          # BUILD_NUMBER задан -> релиз 26.1.2-xmine.<N> в раздел releases.
+          # Не задан -> 26.1.2-xmine-SNAPSHOT в snapshots. Логика в
+          # settings.gradle.kts, здесь только выбор режима.
+          #
+          # Номер берётся из github.run_number и потому НЕ сплошной: счётчик
+          # растёт и на снапшотных прогонах тоже. Это допустимо - от номера
+          # сборки требуется уникальность и рост, а не отсутствие пропусков.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             && [ "${{ inputs.release }}" = "true" ]; then
+            echo "BUILD_NUMBER=${{ github.run_number }}" >> "$GITHUB_ENV"
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=snapshot" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail early without credentials
+        run: |
+          # Без учётки сборка дошла бы до конца и упала на последнем шаге, потратив
+          # десятки минут на applyPatches. Дешевле проверить сразу.
+          if [ -z "${XMINE_MAVEN_USERNAME:-}" ] || [ -z "${XMINE_MAVEN_PASSWORD:-}" ]; then
+            echo "::error::Secrets XMINE_MAVEN_USERNAME / XMINE_MAVEN_PASSWORD are not set"
+            exit 1
+          fi
+
+      - name: Apply patches
+        run: |
+          git config --global user.email "no-reply@github.com"
+          git config --global user.name "GitHub Actions"
+          ./gradlew applyPatches --stacktrace
+
+      - name: Test
+        # Свои правки живут в paper-api (подстановка env в YamlConfiguration), и
+        # их тесты - единственное, что отделяет сломанное ядро от публикации.
+        run: ./gradlew :paper-api:test --stacktrace
+
+      - name: Publish paperclip
+        run: ./gradlew :paper-server:publishPaperclipPublicationToXmineRepository --stacktrace
+
+      - name: Report coordinate
+        run: |
+          VERSION="$(./gradlew -q printPaperVersion | tail -1)"
+          echo "### Published ${{ steps.version.outputs.kind }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "io.papermc.paper:paperclip:$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
