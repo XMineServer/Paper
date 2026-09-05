@@ -18,6 +18,21 @@ public final class PaperBootstrap {
 
         getStartupVersionMessages().forEach(LOGGER::info);
 
+        // Paper start - XMine - --dump-plugin-libraries
+        // The dump runs the plugin discovery phase and nothing else, so it forks off here instead of inside
+        // net.minecraft.server.Main: that way the server main is never entered at all -- no pid file, no crash
+        // report preload, no Bootstrap.bootStrap() (which is what enters the plugin bootstrappers), no world, no
+        // network. See PluginLibraryDumper for where the "plugins are not started" line runs exactly.
+        if (options.has(io.papermc.paper.plugin.util.PluginLibraryDumper.OPTION)) {
+            try {
+                io.papermc.paper.plugin.util.PluginLibraryDumper.dump(options);
+            } catch (final Exception e) {
+                throw new RuntimeException("Failed to dump plugin libraries", e);
+            }
+            return;
+        }
+        // Paper end - XMine - --dump-plugin-libraries
+
         Main.main(options);
     }
 

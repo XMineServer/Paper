@@ -9,6 +9,7 @@ import java.util.List;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
+import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory;
 import org.eclipse.aether.graph.Dependency;
@@ -129,6 +130,34 @@ public class MavenLibraryResolver implements ClassPathLibrary {
         this.repositories.add(remoteRepository);
     }
 
+    // Paper start - XMine - inspect declared libraries without resolving them
+    /**
+     * Provides the dependencies declared on this resolver, without resolving or downloading anything.
+     * <p>
+     * Exists so that the server can enumerate what a plugin asks for (see the {@code --dump-plugin-libraries}
+     * flag) instead of having to run {@link #register(LibraryStore)}, which performs network IO.
+     *
+     * @return an immutable copy of the declared dependencies
+     * @hidden
+     */
+    @org.jetbrains.annotations.ApiStatus.Internal
+    public List<Dependency> declaredDependencies() {
+        return List.copyOf(this.dependencies);
+    }
+
+    /**
+     * Provides the repositories declared on this resolver, without resolving or downloading anything.
+     *
+     * @return an immutable copy of the declared repositories
+     * @hidden
+     * @see #declaredDependencies()
+     */
+    @org.jetbrains.annotations.ApiStatus.Internal
+    public List<RemoteRepository> declaredRepositories() {
+        return List.copyOf(this.repositories);
+    }
+    // Paper end - XMine - inspect declared libraries without resolving them
+
     /**
      * Resolves the provided dependencies and adds them to the library store.
      *
@@ -137,6 +166,26 @@ public class MavenLibraryResolver implements ClassPathLibrary {
      */
     @Override
     public void register(final LibraryStore store) throws LibraryLoadingException {
+        for (final Artifact artifact : this.resolveArtifacts()) {
+            final File file = artifact.getFile();
+            store.addLibrary(file.toPath());
+        }
+    }
+
+    // Paper start - XMine - inspect declared libraries without resolving them
+    /**
+     * Resolves the declared dependencies into their transitive closure, downloading whatever is missing from the
+     * local repository, and returns the resulting artifacts without registering them anywhere.
+     * <p>
+     * Split out of {@link #register(LibraryStore)} so that the {@code --dump-plugin-libraries} flag can report the
+     * resolved coordinates, not just the file paths a {@link LibraryStore} would see.
+     *
+     * @return the resolved artifacts, in resolution order
+     * @throws LibraryLoadingException if resolving a dependency failed
+     * @hidden
+     */
+    @org.jetbrains.annotations.ApiStatus.Internal
+    public List<Artifact> resolveArtifacts() throws LibraryLoadingException {
         final List<RemoteRepository> repos = this.repository.newResolutionRepositories(this.session, this.repositories);
 
         final DependencyResult result;
@@ -146,11 +195,13 @@ public class MavenLibraryResolver implements ClassPathLibrary {
             throw new LibraryLoadingException("Error resolving libraries", ex);
         }
 
+        final List<Artifact> artifacts = new ArrayList<>(result.getArtifactResults().size());
         for (final ArtifactResult artifact : result.getArtifactResults()) {
-            final File file = artifact.getArtifact().getFile();
-            store.addLibrary(file.toPath());
+            artifacts.add(artifact.getArtifact());
         }
+        return artifacts;
     }
+    // Paper end - XMine - inspect declared libraries without resolving them
 
     private static String getDefaultMavenCentralMirror() {
         String central = System.getenv("PAPER_DEFAULT_CENTRAL_REPOSITORY");

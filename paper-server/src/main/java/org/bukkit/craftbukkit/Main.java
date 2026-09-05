@@ -139,6 +139,15 @@ public class Main {
                         .defaultsTo(new File[] {})
                         .describedAs("Plugin directory");
 
+                // Paper start - XMine - --dump-plugin-libraries
+                this.acceptsAll(asList("dump-plugin-libraries"), "List every library the discovered plugins would make the server download, as JSON, then exit without starting the server. Honours --plugins, --add-plugin and --add-plugin-dir. Pass an output file to get the JSON on its own; without a value it goes to stdout, which it shares with the startup log.")
+                        .withOptionalArg()
+                        .ofType(File.class)
+                        .describedAs("JSON output file");
+
+                this.accepts("dump-plugin-libraries-transitive", "Only with --dump-plugin-libraries: additionally resolve the declared coordinates, which requires network access and populates the 'libraries' folder, and report the full transitive closure. Off by default: the plain dump lists declarations only and touches the network not at all.");
+                // Paper end - XMine - --dump-plugin-libraries
+
                 this.accepts("server-name", "Name of the server")
                         .withRequiredArg()
                         .ofType(String.class)

@@ -58,6 +58,17 @@ public class PaperClasspathBuilder implements PluginClasspathBuilder {
     }
 
     public List<Path> buildLibraryPaths() {
+        // Paper start - XMine - --dump-plugin-libraries
+        // ClassPathLibrary#register is where resolution (and therefore downloading) happens. While the dump flag is
+        // running we only want the declarations, so the libraries are handed over unregistered and the plugin gets an
+        // empty library classpath -- which is harmless, because the flag never instantiates the plugin.
+        final io.papermc.paper.plugin.util.PluginLibraryDumper dumper = io.papermc.paper.plugin.util.PluginLibraryDumper.active();
+        if (dumper != null) {
+            dumper.recordPaperLibraries(this.context.getConfiguration(), this.context.getPluginSource(), this.libraries);
+            return List.of();
+        }
+        // Paper end - XMine - --dump-plugin-libraries
+
         PaperLibraryStore paperLibraryStore = new PaperLibraryStore();
         for (ClassPathLibrary library : this.libraries) {
             library.register(paperLibraryStore);
