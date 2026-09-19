@@ -5,6 +5,8 @@ import com.google.common.base.Preconditions;
 import io.papermc.paper.configuration.EnvironmentSubstitutor;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.nio.file.Path;
 import java.util.regex.Pattern;
 // XMine end - подстановка переменных среды
 import java.io.ByteArrayInputStream;
@@ -70,6 +72,21 @@ public class YamlConfiguration extends FileConfiguration {
      */
     private final Map<List<Object>, EnvironmentTemplate> environmentTemplates = new HashMap<>();
     /**
+     * Templates of the last {@link #load(File)} of each file, by absolute path, shared by every
+     * instance. Templates of one instance do not help a plugin that loads its file, copies the
+     * values into a fresh {@code YamlConfiguration} and saves that one over the same file - the
+     * usual shape of a config migrator (OpenEco does exactly this on every enable). Without this
+     * map the fresh instance writes the expanded values, secrets included, onto disk.
+     */
+    private static final Map<Path, Map<List<Object>, EnvironmentTemplate>> FILE_ENVIRONMENT_TEMPLATES = new ConcurrentHashMap<>();
+    /**
+     * Templates of the file {@link #save(File)} is currently writing, for {@link #saveToString()}
+     * to pick up. A field rather than a parameter so that {@code save(File)} keeps going through
+     * the overridable {@code saveToString()}.
+     */
+    @Nullable
+    private Map<List<Object>, EnvironmentTemplate> saveTargetTemplates;
+    /**
      * A decimal integer whose {@code toString} is byte-for-byte what was read. Anything else -
      * {@code 0755}, {@code 1_000}, {@code 0x1F}, {@code -0} - is deliberately left as a string:
      * YAML 1.1 would turn {@code 0755} into 493, and the value written back on the next save
@@ -108,7 +125,16 @@ public class YamlConfiguration extends FileConfiguration {
         yamlDumperOptions.setProcessComments(options().parseComments());
 
         MappingNode node = toNodeTree(this);
-        restoreEnvironmentTemplates(node, new ArrayList<>()); // XMine - подстановка переменных среды
+        // XMine start - подстановка переменных среды
+        Map<List<Object>, EnvironmentTemplate> templates = this.environmentTemplates;
+        if (this.saveTargetTemplates != null) {
+            // What this instance loaded itself wins: it is the more direct record of where a
+            // value came from than whatever instance loaded the target file last.
+            templates = new HashMap<>(this.saveTargetTemplates);
+            templates.putAll(this.environmentTemplates);
+        }
+        restoreEnvironmentTemplates(node, new ArrayList<>(), templates);
+        // XMine end - подстановка переменных среды
 
         node.setBlockComments(getCommentLines(saveHeader(options().getHeader()), CommentType.BLOCK));
         node.setEndComments(getCommentLines(options().getFooter(), CommentType.BLOCK));
@@ -163,6 +189,36 @@ public class YamlConfiguration extends FileConfiguration {
     }
 
     // XMine start - подстановка переменных среды
+    @Override
+    public void load(@NotNull File file) throws FileNotFoundException, IOException, InvalidConfigurationException {
+        super.load(file);
+        Path key = environmentTemplateKey(file);
+        if (this.environmentTemplates.isEmpty()) {
+            // The file no longer holds references: nothing is left to restore into it.
+            FILE_ENVIRONMENT_TEMPLATES.remove(key);
+        } else {
+            FILE_ENVIRONMENT_TEMPLATES.put(key, Map.copyOf(this.environmentTemplates));
+        }
+    }
+
+    @Override
+    public void save(@NotNull File file) throws IOException {
+        Preconditions.checkArgument(file != null, "File cannot be null");
+
+        Map<List<Object>, EnvironmentTemplate> previous = this.saveTargetTemplates;
+        this.saveTargetTemplates = FILE_ENVIRONMENT_TEMPLATES.get(environmentTemplateKey(file));
+        try {
+            super.save(file);
+        } finally {
+            this.saveTargetTemplates = previous;
+        }
+    }
+
+    @NotNull
+    private static Path environmentTemplateKey(@NotNull File file) {
+        return file.getAbsoluteFile().toPath().normalize();
+    }
+
     /**
      * Looks up an environment variable. Overridable so that tests - and any future caller that
      * wants a different source of values - do not have to mutate the real process environment.
@@ -296,9 +352,11 @@ public class YamlConfiguration extends FileConfiguration {
      *
      * @param node the node to visit
      * @param path the structural path to {@code node}
+     * @param templates the templates to restore, by structural path
      */
-    private void restoreEnvironmentTemplates(@NotNull Node node, @NotNull List<Object> path) {
-        if (this.environmentTemplates.isEmpty()) {
+    private static void restoreEnvironmentTemplates(@NotNull Node node, @NotNull List<Object> path,
+                                                    @NotNull Map<List<Object>, EnvironmentTemplate> templates) {
+        if (templates.isEmpty()) {
             return;
         }
 
@@ -312,14 +370,14 @@ public class YamlConfiguration extends FileConfiguration {
                 }
                 path.add(scalarKey.getValue());
                 Node value = tuple.getValueNode();
-                ScalarNode restored = restoreEnvironmentTemplate(value, path);
+                ScalarNode restored = restoreEnvironmentTemplate(value, path, templates);
                 if (restored != null) {
                     if (rebuilt == null) {
                         rebuilt = new ArrayList<>(tuples);
                     }
                     rebuilt.set(i, new NodeTuple(tuple.getKeyNode(), restored));
                 } else {
-                    restoreEnvironmentTemplates(value, path);
+                    restoreEnvironmentTemplates(value, path, templates);
                 }
                 path.remove(path.size() - 1);
             }
@@ -330,11 +388,11 @@ public class YamlConfiguration extends FileConfiguration {
             List<Node> values = sequenceNode.getValue();
             for (int i = 0; i < values.size(); i++) {
                 path.add(i);
-                ScalarNode restored = restoreEnvironmentTemplate(values.get(i), path);
+                ScalarNode restored = restoreEnvironmentTemplate(values.get(i), path, templates);
                 if (restored != null) {
                     values.set(i, restored);
                 } else {
-                    restoreEnvironmentTemplates(values.get(i), path);
+                    restoreEnvironmentTemplates(values.get(i), path, templates);
                 }
                 path.remove(path.size() - 1);
             }
@@ -342,11 +400,12 @@ public class YamlConfiguration extends FileConfiguration {
     }
 
     @Nullable
-    private ScalarNode restoreEnvironmentTemplate(@NotNull Node node, @NotNull List<Object> path) {
+    private static ScalarNode restoreEnvironmentTemplate(@NotNull Node node, @NotNull List<Object> path,
+                                                         @NotNull Map<List<Object>, EnvironmentTemplate> templates) {
         if (!(node instanceof ScalarNode scalarNode)) {
             return null;
         }
-        EnvironmentTemplate template = this.environmentTemplates.get(path);
+        EnvironmentTemplate template = templates.get(path);
         if (template == null || !template.substituted().equals(scalarNode.getValue())) {
             return null;
         }

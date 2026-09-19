@@ -3,12 +3,17 @@ package org.bukkit.configuration.file;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 // XMine - подстановка переменных среды
 public class YamlConfigurationEnvironmentTest {
@@ -208,5 +213,124 @@ public class YamlConfigurationEnvironmentTest {
         String saved = configuration.saveToString();
         assertTrue(saved.contains("# where it lives"), saved);
         assertTrue(saved.contains("${DB_HOST}"), saved);
+    }
+
+    private static TestConfiguration loadFile(File file) throws Exception {
+        TestConfiguration configuration = new TestConfiguration();
+        configuration.load(file);
+        return configuration;
+    }
+
+    /**
+     * What a config migrator does: every value of {@code source} moved into a brand new
+     * configuration that never loaded anything itself.
+     */
+    private static YamlConfiguration copyIntoFreshConfiguration(YamlConfiguration source) {
+        YamlConfiguration copy = new YamlConfiguration();
+        for (String key : source.getKeys(true)) {
+            if (!source.isConfigurationSection(key)) {
+                copy.set(key, source.get(key));
+            }
+        }
+        return copy;
+    }
+
+    @Test
+    public void testFreshInstanceSavingOverTheLoadedFileKeepsTheTemplate(@TempDir Path directory) throws Exception {
+        // OpenEco's ConfigMigrator on every enable: load config.yml, copy the values into a new
+        // YamlConfiguration merged with its defaults, save that over config.yml. The new
+        // instance loaded nothing, so its own templates cannot help.
+        File file = directory.resolve("config.yml").toFile();
+        Files.writeString(file.toPath(), """
+            storage:
+              jdbc-url: "jdbc:postgresql://${DB_HOST}:${DB_PORT}/openeco?sslmode=disable"
+              password: "${DB_SECRET}"
+              port: ${DB_PORT}
+            """, StandardCharsets.UTF_8);
+
+        YamlConfiguration migrated = copyIntoFreshConfiguration(loadFile(file));
+        migrated.set("storage.pool-size", 5); // a default the migrator merged in
+        migrated.save(file);
+
+        String saved = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+        assertTrue(saved.contains("jdbc:postgresql://${DB_HOST}:${DB_PORT}/openeco?sslmode=disable"), saved);
+        assertTrue(saved.contains("${DB_SECRET}"), saved);
+        assertTrue(saved.contains("port: ${DB_PORT}"), saved);
+        assertFalse(saved.contains("hunter2"), saved);
+        assertFalse(saved.contains("db.internal"), saved);
+        assertTrue(saved.contains("pool-size: 5"), saved);
+
+        // and the file still means what it meant
+        TestConfiguration reloaded = loadFile(file);
+        assertEquals("hunter2", reloaded.getString("storage.password"));
+        assertEquals(5432, reloaded.getInt("storage.port"));
+    }
+
+    @Test
+    public void testFreshInstanceDeliberateChangeWins(@TempDir Path directory) throws Exception {
+        File file = directory.resolve("config.yml").toFile();
+        Files.writeString(file.toPath(), "password: ${DB_SECRET}\n", StandardCharsets.UTF_8);
+
+        YamlConfiguration migrated = copyIntoFreshConfiguration(loadFile(file));
+        migrated.set("password", "rotated");
+        migrated.save(file);
+
+        String saved = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+        assertTrue(saved.contains("rotated"), saved);
+        assertFalse(saved.contains("${DB_SECRET}"), saved);
+    }
+
+    @Test
+    public void testFileTemplatesDoNotLeakIntoOtherFiles(@TempDir Path directory) throws Exception {
+        // The templates belong to the file they were read from. Another file never held the
+        // reference, and a coincidentally equal value there must stay the value.
+        File source = directory.resolve("source.yml").toFile();
+        File other = directory.resolve("other.yml").toFile();
+        Files.writeString(source.toPath(), "host: ${DB_HOST}\n", StandardCharsets.UTF_8);
+        loadFile(source);
+
+        YamlConfiguration unrelated = new YamlConfiguration();
+        unrelated.set("host", "db.internal");
+        unrelated.save(other);
+
+        String saved = Files.readString(other.toPath(), StandardCharsets.UTF_8);
+        assertTrue(saved.contains("host: db.internal"), saved);
+    }
+
+    @Test
+    public void testReloadWithoutReferencesForgetsTheTemplates(@TempDir Path directory) throws Exception {
+        // Once the file on disk carries a literal, the last load says there is nothing to
+        // restore - an old template must not come back from a previous load.
+        File file = directory.resolve("config.yml").toFile();
+        Files.writeString(file.toPath(), "host: ${DB_HOST}\n", StandardCharsets.UTF_8);
+        loadFile(file);
+        Files.writeString(file.toPath(), "host: db.internal\n", StandardCharsets.UTF_8);
+        loadFile(file);
+
+        YamlConfiguration fresh = new YamlConfiguration();
+        fresh.set("host", "db.internal");
+        fresh.save(file);
+
+        String saved = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+        assertTrue(saved.contains("host: db.internal"), saved);
+        assertFalse(saved.contains("${DB_HOST}"), saved);
+    }
+
+    @Test
+    public void testSameFileByAnotherSpelling(@TempDir Path directory) throws Exception {
+        // new File(getDataFolder(), "config.yml") in one place, a relative-looking path with
+        // "." segments in another: both name the same file.
+        Files.createDirectories(directory.resolve("plugin"));
+        File file = directory.resolve("plugin").resolve("config.yml").toFile();
+        Files.writeString(file.toPath(), "password: ${DB_SECRET}\n", StandardCharsets.UTF_8);
+        loadFile(file);
+
+        YamlConfiguration fresh = new YamlConfiguration();
+        fresh.set("password", "hunter2");
+        fresh.save(new File(directory.resolve("plugin").resolve(".").toFile(), "config.yml"));
+
+        String saved = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+        assertTrue(saved.contains("${DB_SECRET}"), saved);
+        assertFalse(saved.contains("hunter2"), saved);
     }
 }
