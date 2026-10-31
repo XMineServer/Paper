@@ -11,7 +11,7 @@
 # Отсюда же остальные меры: триггера `pull_request` нет вовсе, push ограничен
 # нашими ветками, а job не запускается в форках самого форка.
 
-name: XMine - publish core
+name: XMine - publish core and API
 
 on:
   push:
@@ -130,12 +130,14 @@ jobs:
           ./gradlew applyPatches --stacktrace
 
       - name: Test
-        # Свои правки живут в paper-api (подстановка env в YamlConfiguration), и
-        # их тесты - единственное, что отделяет сломанное ядро от публикации.
-        run: ./gradlew :paper-api:test --stacktrace
+        run: ./gradlew :paper-api:test :paper-server:testBundleSelection --stacktrace
 
-      - name: Publish paperclip
-        run: ./gradlew :paper-server:publishPaperclipPublicationToXmineRepository --stacktrace
+      - name: Publish paperclip and API
+        run: >-
+          ./gradlew
+          :paper-server:publishPaperclipPublicationToXmineRepository
+          :paper-api:publishMavenPublicationToXmineRepository
+          --stacktrace
 
       - name: Report coordinate
         run: |
@@ -143,4 +145,5 @@ jobs:
           echo "### Published ${{ steps.version.outputs.kind }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "io.papermc.paper:paperclip:$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "io.papermc.paper:paper-api:$VERSION" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
