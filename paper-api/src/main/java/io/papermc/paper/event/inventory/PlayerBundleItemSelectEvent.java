@@ -31,9 +31,16 @@ public final class PlayerBundleItemSelectEvent extends InventoryEvent {
     private final int previousIndex;
     private final int selectedIndex;
     private final Direction direction;
+    private final OptionalInt clientPreviousIndex;
+    private final Direction clientDirection;
 
     @ApiStatus.Internal
     public PlayerBundleItemSelectEvent(final InventoryView view, final ItemStack bundle, final int rawSlot, final ItemStack previousItem, final ItemStack selectedItem, final int previousIndex, final int selectedIndex, final Direction direction) {
+        this(view, bundle, rawSlot, previousItem, selectedItem, previousIndex, selectedIndex, direction, OptionalInt.empty(), Direction.UNKNOWN);
+    }
+
+    @ApiStatus.Internal
+    public PlayerBundleItemSelectEvent(final InventoryView view, final ItemStack bundle, final int rawSlot, final ItemStack previousItem, final ItemStack selectedItem, final int previousIndex, final int selectedIndex, final Direction direction, final OptionalInt clientPreviousIndex, final Direction clientDirection) {
         super(view);
 
         this.bundle = bundle;
@@ -46,6 +53,8 @@ public final class PlayerBundleItemSelectEvent extends InventoryEvent {
         this.previousIndex = previousIndex;
         this.selectedIndex = selectedIndex;
         this.direction = direction;
+        this.clientPreviousIndex = clientPreviousIndex;
+        this.clientDirection = clientDirection;
     }
 
     /**
@@ -131,6 +140,29 @@ public final class PlayerBundleItemSelectEvent extends InventoryEvent {
      */
     public Direction getDirection() {
         return this.direction;
+    }
+
+    /**
+     * Client selection before this packet, tracked across acknowledged inventory snapshots.
+     * Empty until an initial snapshot has been acknowledged; -1 means no client selection.
+     * Only available for non-player containers. Unlike the server component index this
+     * accounts for reset on receiving a replacement stack and for in-flight wheel packets.
+     *
+     * @return the tracked client selection, if synchronized
+     */
+    public OptionalInt getClientPreviousIndex() {
+        return this.clientPreviousIndex;
+    }
+
+    /**
+     * Direction calculated from the synchronized client selection stream.
+     * UNKNOWN means no safe direction is available (including fewer than three visible entries).
+     * Snapshot and ping are bundled atomically; pong establishes the reset boundary.
+     *
+     * @return the client selection direction
+     */
+    public Direction getClientDirection() {
+        return this.clientDirection;
     }
 
     @Override

@@ -1620,7 +1620,7 @@ public class CraftEventFactory {
             return;
         }
 
-        if (slotId < 0 || slotId >= player.containerMenu.slots.size() || selectedIndex <= net.minecraft.world.item.component.BundleContents.NO_SELECTED_ITEM_INDEX) {
+        if (slotId < 0 || slotId >= player.containerMenu.slots.size()) {
             return;
         }
 
@@ -1634,15 +1634,17 @@ public class CraftEventFactory {
             return;
         }
 
+        final int visible = net.minecraft.world.item.BundleItem.getNumberOfItemsToShow(item);
+        final io.papermc.paper.inventory.BundleSelectionTracker.Selection clientSelection = ((ServerPlayer) player).connection.bundleSelectionTracker.select(player.containerMenu.containerId, slotId, selectedIndex, visible);
         final int previousIndex = contents.getSelectedItemIndex();
-        if (selectedIndex >= contents.size() || selectedIndex == previousIndex) {
+        if (selectedIndex < 0 || selectedIndex >= contents.size() || (selectedIndex == previousIndex && clientSelection.direction() == PlayerBundleItemSelectEvent.Direction.UNKNOWN)) {
             return;
         }
 
         PlayerBundleItemSelectEvent.Direction direction = PlayerBundleItemSelectEvent.Direction.UNKNOWN;
         // Scroll direction can only be reliably determined if three or more item stacks are in the bundle,
         // because we only have access to the before and after selection index.
-        if (contents.size() >= 3) {
+        if (contents.size() >= 3 && previousIndex != selectedIndex) {
             if (previousIndex == net.minecraft.world.item.component.BundleContents.NO_SELECTED_ITEM_INDEX) {
                 direction = selectedIndex == 0 ? PlayerBundleItemSelectEvent.Direction.FORWARD : PlayerBundleItemSelectEvent.Direction.BACKWARD;
             } else {
@@ -1663,7 +1665,9 @@ public class CraftEventFactory {
             CraftItemStack.asCraftMirror(contents.items().get(selectedIndex).create()),
             previousIndex,
             selectedIndex,
-            direction
+            direction,
+            clientSelection.previous(),
+            clientSelection.direction()
         ).callEvent();
     }
 
