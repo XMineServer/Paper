@@ -237,6 +237,19 @@ tasks.test {
     jvmArgumentProviders.add(provider)
 }
 
+tasks.register<Test>("testBundleSelection") {
+    group = "verification"
+    description = "Tests bundle selection synchronization and text updates."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    workingDir = temporaryDir
+    include("**/BundleSelection*Test.class")
+    useJUnitPlatform()
+    val provider = objects.newInstance<MockitoAgentProvider>()
+    provider.fileCollection.from(mockitoAgent)
+    jvmArgumentProviders.add(provider)
+}
+
 val generatedDir: java.nio.file.Path = layout.projectDirectory.dir("src/generated/java").asFile.toPath()
 idea {
     module {

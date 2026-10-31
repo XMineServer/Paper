@@ -382,7 +382,33 @@
      }
  
      @Override
-@@ -572,6 +_,7 @@
+@@ -563,15 +_,33 @@
+         }
+     }
+ 
++    public final io.papermc.paper.inventory.BundleSelectionTracker bundleSelectionTracker = new io.papermc.paper.inventory.BundleSelectionTracker();
++
++    @Override
++    public void send(net.minecraft.network.protocol.Packet<?> packet, final io.netty.channel.@org.jspecify.annotations.Nullable ChannelFutureListener listener) {
++        if (this.player != null && this.server.isSameThread() && io.papermc.paper.event.inventory.PlayerBundleItemSelectEvent.getHandlerList().getRegisteredListeners().length > 0) {
++            packet = this.bundleSelectionTracker.synchronize(packet, this.player.containerMenu.containerId);
++        }
++        super.send(packet, listener);
++    }
++
++    @Override
++    public void handlePong(final net.minecraft.network.protocol.common.ServerboundPongPacket packet) {
++        PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
++        this.bundleSelectionTracker.acknowledge(packet.getId());
++    }
++
+     @Override
+     public void handleBundleItemSelectedPacket(final ServerboundSelectBundleItemPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
++        CraftEventFactory.callPlayerBundleItemSelectEvent(this.player, packet.slotId(), packet.selectedItemIndex()); // Paper - PlayerBundleItemSelectEvent
+         this.player.containerMenu.setSelectedBundleItemIndex(packet.slotId(), packet.selectedItemIndex());
+     }
+ 
      @Override
      public void handleRecipeBookChangeSettingsPacket(final ServerboundRecipeBookChangeSettingsPacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());

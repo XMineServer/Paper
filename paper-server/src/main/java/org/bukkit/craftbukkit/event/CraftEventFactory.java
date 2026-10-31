@@ -15,6 +15,7 @@ import io.papermc.paper.event.connection.PlayerConnectionValidateLoginEvent;
 import io.papermc.paper.event.entity.ItemTransportingEntityValidateTargetEvent;
 import io.papermc.paper.event.player.PlayerBedFailEnterEvent;
 import io.papermc.paper.event.player.PlayerToggleEntityAgeLockEvent;
+import io.papermc.paper.event.inventory.PlayerBundleItemSelectEvent;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
@@ -1610,6 +1611,64 @@ public class CraftEventFactory {
         InventoryCloseEvent event = new InventoryCloseEvent(human.containerMenu.getBukkitView(), reason); // Paper
         human.level().getCraftServer().getPluginManager().callEvent(event);
         human.containerMenu.transferTo(human.inventoryMenu, human.getBukkitEntity());
+    }
+
+    public static void callPlayerBundleItemSelectEvent(final net.minecraft.world.entity.player.Player player, final int slotId, final int selectedIndex) {
+        if (player.isCreative() && player.containerMenu instanceof net.minecraft.world.inventory.InventoryMenu) {
+            // The packet's slotId will always be 0 if this packet is sent for a player selecting an item in a bundle in their creative inventory,
+            // making it unfit for firing an event.
+            return;
+        }
+
+        if (slotId < 0 || slotId >= player.containerMenu.slots.size()) {
+            return;
+        }
+
+        final net.minecraft.world.item.ItemStack item = player.containerMenu.slots.get(slotId).getItem();
+        if (!item.is(net.minecraft.tags.ItemTags.BUNDLES)) {
+            return;
+        }
+
+        final net.minecraft.world.item.component.BundleContents contents = item.get(net.minecraft.core.component.DataComponents.BUNDLE_CONTENTS);
+        if (contents == null) {
+            return;
+        }
+
+        final int visible = net.minecraft.world.item.BundleItem.getNumberOfItemsToShow(item);
+        final io.papermc.paper.inventory.BundleSelectionTracker.Selection clientSelection = ((ServerPlayer) player).connection.bundleSelectionTracker.select(player.containerMenu.containerId, slotId, selectedIndex, visible);
+        final int previousIndex = contents.getSelectedItemIndex();
+        if (selectedIndex < 0 || selectedIndex >= contents.size() || (selectedIndex == previousIndex && clientSelection.direction() == PlayerBundleItemSelectEvent.Direction.UNKNOWN)) {
+            return;
+        }
+
+        PlayerBundleItemSelectEvent.Direction direction = PlayerBundleItemSelectEvent.Direction.UNKNOWN;
+        // Scroll direction can only be reliably determined if three or more item stacks are in the bundle,
+        // because we only have access to the before and after selection index.
+        if (contents.size() >= 3 && previousIndex != selectedIndex) {
+            if (previousIndex == net.minecraft.world.item.component.BundleContents.NO_SELECTED_ITEM_INDEX) {
+                direction = selectedIndex == 0 ? PlayerBundleItemSelectEvent.Direction.FORWARD : PlayerBundleItemSelectEvent.Direction.BACKWARD;
+            } else {
+                int diff = selectedIndex - previousIndex;
+                direction = diff > 0 ? PlayerBundleItemSelectEvent.Direction.FORWARD : PlayerBundleItemSelectEvent.Direction.BACKWARD;
+
+                if (Math.abs(diff) == contents.size() - 1) {
+                    direction = direction.flip();
+                }
+            }
+        }
+
+        new PlayerBundleItemSelectEvent(
+            player.containerMenu.getBukkitView(),
+            CraftItemStack.asCraftMirror(item),
+            slotId,
+            contents.getSelectedItem() != null ? CraftItemStack.asCraftMirror(contents.getSelectedItem().create()) : org.bukkit.inventory.ItemStack.empty(),
+            CraftItemStack.asCraftMirror(contents.items().get(selectedIndex).create()),
+            previousIndex,
+            selectedIndex,
+            direction,
+            clientSelection.previous(),
+            clientSelection.direction()
+        ).callEvent();
     }
 
     public static ItemStack handleEditBookEvent(ServerPlayer player, int itemInHandIndex, ItemStack itemInHand, ItemStack newBookItem) {
